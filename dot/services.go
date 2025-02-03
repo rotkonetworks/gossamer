@@ -31,6 +31,7 @@ import (
 	"github.com/ChainSafe/gossamer/lib/crypto/sr25519"
 	"github.com/ChainSafe/gossamer/lib/genesis"
 	"github.com/ChainSafe/gossamer/lib/grandpa"
+	"github.com/ChainSafe/gossamer/lib/grandpa/warpsync"
 	"github.com/ChainSafe/gossamer/lib/keystore"
 	"github.com/ChainSafe/gossamer/lib/runtime"
 	rtstorage "github.com/ChainSafe/gossamer/lib/runtime/storage"
@@ -180,16 +181,16 @@ func createRuntime(config *cfg.Config, ns runtime.NodeStorage, st *state.Service
 		return nil, err
 	}
 
-	wasmerLogLevel, err := log.ParseLevel(config.Log.Wasmer)
+	runtimeLogLvl, err := log.ParseLevel(config.Log.Runtime)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse wasmer log level: %w", err)
+		return nil, fmt.Errorf("failed to parse runtime log level: %w", err)
 	}
 	switch config.Core.WasmInterpreter {
 	case wazero_runtime.Name:
 		rtCfg := wazero_runtime.Config{
 			Storage:     ts,
 			Keystore:    ks,
-			LogLvl:      wasmerLogLevel,
+			LogLvl:      runtimeLogLvl,
 			NodeStorage: ns,
 			Network:     net,
 			Transaction: st.Transaction,
@@ -349,7 +350,7 @@ func (nodeBuilder) createNetworkService(config *cfg.Config, stateSrvc *state.Ser
 		return nil, fmt.Errorf("failed to parse network log level: %w", err)
 	}
 
-	warpSyncProvider := grandpa.NewWarpSyncProofProvider(
+	warpSyncProvider := warpsync.NewWarpSyncProofProvider(
 		stateSrvc.Block, stateSrvc.Grandpa,
 	)
 
@@ -518,8 +519,33 @@ func (nodeBuilder) newSyncService(config *cfg.Config, st *state.Service, fg sync
 		return nil, err
 	}
 
-	requestMaker := net.GetRequestResponseProtocol(network.SyncID,
-		blockRequestTimeout, network.MaxBlockResponseSize)
+	syncLogLevel, err := log.ParseLevel(config.Log.Sync)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse sync log level: %w", err)
+	}
+
+	// Should be shared between all sync strategies
+	peersView := sync.NewPeerViewSet()
+
+	var warpSyncStrategy sync.Strategy
+
+	if config.Core.Sync == "warp" {
+		warpSyncProvider := warpsync.NewWarpSyncProofProvider(st.Block, st.Grandpa)
+
+		warpSyncCfg := &sync.WarpSyncConfig{
+			Telemetry:        telemetryMailer,
+			BadBlocks:        genesisData.BadBlocks,
+			WarpSyncProvider: warpSyncProvider,
+			WarpSyncRequestMaker: net.GetRequestResponseProtocol(network.WarpSyncID,
+				blockRequestTimeout, network.MaxBlockResponseSize),
+			SyncRequestMaker: net.GetRequestResponseProtocol(network.SyncID,
+				blockRequestTimeout, network.MaxBlockResponseSize),
+			BlockState: st.Block,
+			Peers:      peersView,
+		}
+
+		warpSyncStrategy = sync.NewWarpSyncStrategy(warpSyncCfg)
+	}
 
 	syncCfg := &sync.FullSyncConfig{
 		BlockState:         st.Block,
@@ -530,21 +556,30 @@ func (nodeBuilder) newSyncService(config *cfg.Config, st *state.Service, fg sync
 		BlockImportHandler: cs,
 		Telemetry:          telemetryMailer,
 		BadBlocks:          genesisData.BadBlocks,
-		RequestMaker:       requestMaker,
+		RequestMaker: net.GetRequestResponseProtocol(network.SyncID,
+			blockRequestTimeout, network.MaxBlockResponseSize),
+		Peers: peersView,
 	}
 	fullSync := sync.NewFullSyncStrategy(syncCfg)
 
 	return sync.NewSyncService(
+		syncLogLevel,
 		sync.WithNetwork(net),
 		sync.WithBlockState(st.Block),
 		sync.WithSlotDuration(slotDuration),
-		sync.WithStrategies(fullSync, nil),
+		sync.WithWarpSyncStrategy(warpSyncStrategy),
+		sync.WithFullSyncStrategy(fullSync),
 		sync.WithMinPeers(config.Network.MinPeers),
 	), nil
 }
 
-func (nodeBuilder) createDigestHandler(st *state.Service) (*digest.Handler, error) {
-	return digest.NewHandler(st.Block, st.Epoch, st.Grandpa)
+func (nodeBuilder) createDigestHandler(config *cfg.Config, st *state.Service) (*digest.Handler, error) {
+	digestLogLevel, err := log.ParseLevel(config.Log.Digest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse digest log level: %w", err)
+	}
+
+	return digest.NewHandler(digestLogLevel, st.Block, st.Epoch, st.Grandpa)
 }
 
 func createPprofService(config cfg.PprofConfig) (service *pprof.Service) {

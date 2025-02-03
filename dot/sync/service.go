@@ -92,6 +92,7 @@ type Strategy interface {
 	Process(results []*SyncTaskResult) (done bool, repChanges []Change, blocks []peer.ID, err error)
 	ShowMetrics()
 	IsSynced() bool
+	Result() any
 }
 
 type SyncService struct {
@@ -100,8 +101,9 @@ type SyncService struct {
 	network    Network
 	blockState BlockState
 
-	currentStrategy Strategy
-	defaultStrategy Strategy
+	currentStrategy  Strategy
+	fullSyncStrategy Strategy
+	warpSyncStrategy Strategy
 
 	workerPool        *syncWorkerPool
 	waitPeersDuration time.Duration
@@ -113,7 +115,9 @@ type SyncService struct {
 	stopCh chan struct{}
 }
 
-func NewSyncService(cfgs ...ServiceConfig) *SyncService {
+func NewSyncService(logLvl log.Level, cfgs ...ServiceConfig) *SyncService {
+	logger.Patch(log.SetLevel(logLvl))
+
 	svc := &SyncService{
 		minPeers:              minPeersDefault,
 		waitPeersDuration:     waitPeersDefaultTimeout,
@@ -123,6 +127,13 @@ func NewSyncService(cfgs ...ServiceConfig) *SyncService {
 
 	for _, cfg := range cfgs {
 		cfg(svc)
+	}
+
+	// Set initial strategy
+	if svc.warpSyncStrategy != nil {
+		svc.currentStrategy = svc.warpSyncStrategy
+	} else {
+		svc.currentStrategy = svc.fullSyncStrategy
 	}
 
 	return svc
@@ -170,7 +181,7 @@ func (s *SyncService) Stop() error {
 }
 
 func (s *SyncService) HandleBlockAnnounceHandshake(from peer.ID, msg *network.BlockAnnounceHandshake) error {
-	logger.Infof("receiving a block announce handshake from %s", from.String())
+	logger.Debugf("receiving a block announce handshake from %s", from.String())
 	if err := s.workerPool.fromBlockAnnounceHandshake(from); err != nil {
 		return err
 	}
@@ -281,6 +292,7 @@ func (s *SyncService) runStrategy() {
 
 	results := s.workerPool.submitRequests(tasks)
 	done, repChanges, peersToIgnore, err := s.currentStrategy.Process(results)
+
 	if err != nil {
 		logger.Criticalf("current sync strategy failed with: %s", err.Error())
 		return
@@ -295,9 +307,12 @@ func (s *SyncService) runStrategy() {
 	}
 
 	s.currentStrategy.ShowMetrics()
-	logger.Trace("finish process to acquire more blocks")
 
+	// TODO: why not use s.currentStrategy.IsSynced()?
 	if done {
-		s.currentStrategy = s.defaultStrategy
+		// Switch to full sync when warp sync finishes
+		if s.warpSyncStrategy != nil {
+			s.currentStrategy = s.fullSyncStrategy
+		}
 	}
 }

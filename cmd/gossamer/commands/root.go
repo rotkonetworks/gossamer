@@ -174,7 +174,7 @@ func addRootFlags(cmd *cobra.Command) error {
 		`Set a logging filter.
 	Syntax is a list of 'module=logLevel' (comma separated)
 	e.g. --log sync=debug,core=trace
-	Modules are global, core, digest, sync, network, rpc, state, runtime, babe, grandpa, wasmer.
+	Modules are global, core, digest, sync, network, rpc, state, runtime, babe, grandpa.
 	Log levels (least to most verbose) are error, warn, info, debug, and trace.
 	By default, all modules log 'info'.
 	The global log level can be set with --log global=debug`)
@@ -527,6 +527,14 @@ func addCoreFlags(cmd *cobra.Command) error {
 		"GRANDPA voting period in seconds",
 		"core.grandpa-interval"); err != nil {
 		return fmt.Errorf("failed to add --grandpa-interval flag: %s", err)
+	}
+
+	if err := addStringFlagBindViper(cmd,
+		"sync",
+		config.Core.Sync,
+		"sync mode [warp | full]",
+		"core.sync"); err != nil {
+		return fmt.Errorf("failed to add --sync flag: %s", err)
 	}
 
 	return nil
